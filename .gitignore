@@ -10,3 +10,6 @@ contract/src/managed/
 logs/
 midnight-level-db/
 private/
+
+# Firebase static build
+app/out/
