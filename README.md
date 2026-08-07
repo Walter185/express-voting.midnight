@@ -85,7 +85,6 @@ To achieve true anonymity while preventing double voting, the application separa
 * **Midnight.js** - Client-side SDK for local proof generation (Proof Server interaction) and node communication.
 * **React** & **TypeScript** - For the 3-stage user-friendly voting interface.
 
-## Getting Started
 
 ## Getting Started
 
