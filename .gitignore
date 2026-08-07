@@ -5,3 +5,6 @@ dist/
 !.env.example
 contract/src/managed/
 .DS_Store
+
+# Local voter demo data - NEVER COMMIT
+private/

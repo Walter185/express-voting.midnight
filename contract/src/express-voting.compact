@@ -1,0 +1,163 @@
+pragma language_version 0.23;
+
+import CompactStandardLibrary;
+
+// Express Voting.Midnight
+//
+// Private:
+// - DNI encoded as Bytes<32>
+// - voterSecret
+// - Merkle membership path
+//
+// Public:
+// - electionId
+// - voter registry
+// - used nullifiers
+// - vote commitments
+// - aggregate vote count
+
+export ledger electionId: Bytes<32>;
+
+export ledger voterRegistry: HistoricMerkleTree<10, Bytes<32>>;
+export ledger usedNullifiers: Set<Bytes<32>>;
+export ledger voteCommitments: Set<Bytes<32>>;
+
+export ledger registeredVoterCount: Counter;
+export ledger totalVotes: Counter;
+
+
+// Supplied privately by the voter's local client.
+witness voterDni(): Bytes<32>;
+witness voterSecret(): Bytes<32>;
+
+
+// Supplied privately by the client for Merkle membership.
+witness findVoterPath(
+  commitment: Bytes<32>
+): MerkleTreePath<10, Bytes<32>>;
+
+
+// Voter identity commitment.
+//
+// DNI is never disclosed.
+// Secret prevents brute-force enumeration of DNI numbers.
+export circuit deriveVoterCommitment(
+  dni: Bytes<32>,
+  secret: Bytes<32>
+): Bytes<32> {
+  return persistentHash<Vector<3, Bytes<32>>>([
+    pad(32, "express-voting:voter"),
+    dni,
+    secret
+  ]);
+}
+
+
+// One voting right per voter for this election.
+export circuit deriveVoterNullifier(
+  secret: Bytes<32>,
+  election: Bytes<32>
+): Bytes<32> {
+  return persistentHash<Vector<3, Bytes<32>>>([
+    pad(32, "express-voting:nullifier"),
+    election,
+    secret
+  ]);
+}
+
+
+// Three demo voters are inserted when the contract is deployed.
+// These are commitments only.
+//
+// No DNI and no voterSecret are stored publicly.
+constructor(
+  election: Bytes<32>,
+  voterA: Bytes<32>,
+  voterB: Bytes<32>,
+  voterC: Bytes<32>
+) {
+  electionId = disclose(election);
+
+  voterRegistry.insert(disclose(voterA));
+  voterRegistry.insert(disclose(voterB));
+  voterRegistry.insert(disclose(voterC));
+
+  registeredVoterCount.increment(3);
+}
+
+
+// Checks eligibility without consuming the voting right.
+export circuit verifyVoter(): [] {
+  const dni = voterDni();
+  const secret = voterSecret();
+
+  const commitment =
+    deriveVoterCommitment(dni, secret);
+
+  const path =
+    findVoterPath(commitment);
+
+  const root =
+    merkleTreePathRoot<10, Bytes<32>>(path);
+
+  assert(
+    voterRegistry.checkRoot(disclose(root)),
+    "Voter is not in the electoral registry"
+  );
+
+  const nullifier =
+    deriveVoterNullifier(
+      secret,
+      electionId
+    );
+
+  assert(
+    !usedNullifiers.member(disclose(nullifier)),
+    "Voter has already voted"
+  );
+}
+
+
+// Consumes the voting right and stores only
+// a commitment to the private ballot.
+export circuit castVote(
+  voteCommitment: Bytes<32>
+): [] {
+  const dni = voterDni();
+  const secret = voterSecret();
+
+  const commitment =
+    deriveVoterCommitment(dni, secret);
+
+  const path =
+    findVoterPath(commitment);
+
+  const root =
+    merkleTreePathRoot<10, Bytes<32>>(path);
+
+  assert(
+    voterRegistry.checkRoot(disclose(root)),
+    "Voter is not in the electoral registry"
+  );
+
+  const nullifier =
+    deriveVoterNullifier(
+      secret,
+      electionId
+    );
+
+  assert(
+    !usedNullifiers.member(disclose(nullifier)),
+    "Voter has already voted"
+  );
+
+  usedNullifiers.insert(
+    disclose(nullifier)
+  );
+
+  voteCommitments.insert(
+    disclose(voteCommitment)
+  );
+
+  totalVotes.increment(1);
+}

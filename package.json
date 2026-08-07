@@ -1,0 +1,11 @@
+{
+  "name": "express-voting-midnight",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "voters:commitments": "node scripts/generate-voter-commitments.mjs"
+  },
+  "dependencies": {
+    "@midnight-ntwrk/compact-runtime": "0.16.0"
+  }
+}
