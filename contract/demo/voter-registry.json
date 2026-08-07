@@ -1,0 +1,17 @@
+{
+  "election": "Express Voting Demo",
+  "registeredVoters": [
+    {
+      "id": "walter",
+      "commitment": "8f3a0da2b612d61648644e874f19d63f6f15b2c4aa2342d33555e9888be0db05"
+    },
+    {
+      "id": "rodrigo",
+      "commitment": "ec12c3bf032c9b7088462ce82ca583caed7fabccc2d7cc37473fce4b3920bc05"
+    },
+    {
+      "id": "ivan",
+      "commitment": "72301f0da9ead9d311bce67289d228fda077dbe7d071fec93f40516853b19481"
+    }
+  ]
+}
