@@ -1,0 +1,48 @@
+pragma language_version >= 0.14.0;
+
+import CompactLanguage;
+
+/**
+ * Contrato Inteligente de Votación Privada Express en Midnight Network.
+ * Mantiene los contadores anónimos de votos y el registro público de nulificadores (Nullifiers)
+ * para evitar el doble voto sin revelar la identidad ni la opción elegida por el votante.
+ */
+export ledger votesCandidateA: Counter;
+export ledger votesCandidateB: Counter;
+export ledger votedNullifiers: Map<Bytes<32>, Boolean>;
+
+/**
+ * Circuito ZK para emisión de voto privado.
+ * @param birthYear Año de nacimiento del votante (parámetro privado / witness).
+ * @param dniNullifier Hash nulificador único derivado del DNI Argentino (witness).
+ * @param candidateSelection 1 para Candidato A, 2 para Candidato B.
+ * @param currentYear Año actual de la elección (ej. 2026).
+ */
+export circuit castVote(
+    birthYear: Uint<16>,
+    dniNullifier: Bytes<32>,
+    candidateSelection: Uint<8>,
+    currentYear: Uint<16>
+): [] {
+    // 1. Verificación ZK de Mayoría de Edad (>= 18 años)
+    assert (currentYear - birthYear) >= 18
+        "El votante debe ser mayor de 18 años para participar en la elección";
+
+    // 2. Verificación ZK de Doble Voto (Asegurar que el DNI no votó antes)
+    assert !votedNullifiers.member(dniNullifier)
+        "Este DNI ya ha emitido su voto en la elección. El doble voto está prohibido.";
+
+    // 3. Validación de Opción de Candidato
+    assert (candidateSelection == 1 || candidateSelection == 2)
+        "Opción de candidato no válida. Debe seleccionar Candidato A (1) o Candidato B (2).";
+
+    // 4. Registrar Nulificador en el libro público para invalidar futuros intentos del mismo DNI
+    votedNullifiers.insert(dniNullifier, true);
+
+    // 5. Incrementar el contador público del candidato elegido en anonimato
+    if (candidateSelection == 1) {
+        votesCandidateA.increment(1);
+    } else {
+        votesCandidateB.increment(1);
+    }
+}
