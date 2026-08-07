@@ -1,19 +1,15 @@
 'use client';
 
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import {
-  DniArgentinaData,
-  verifyDniWithGovernmentApi,
-  computeDniNullifier,
-} from '@/lib/argentinaDni';
+import { DniArgentinaData } from '@/lib/argentinaDni';
 import { parseArgentineDniPdf417 } from '@/lib/dniScanner';
 import { startNativeCamera, CameraControl } from '@/lib/cameraScanner';
 import {
-  checkProofServerHealth,
-  submitVoteToMidnight,
-  getPublicLedgerVotes,
+  checkMidnightHealth,
+  verifyVoterEligibility,
+  submitRealVote,
   VoteSubmissionResult,
-} from '@/lib/midnight';
+} from '@/lib/midnightReal';
 
 type AppStep = 'idle' | 'scanning' | 'verifying' | 'voting' | 'submitting' | 'done';
 
@@ -26,15 +22,26 @@ export default function ExpressVotingPage() {
   const [personName, setPersonName] = useState('');
   const [selectedCandidate, setSelectedCandidate] = useState<1 | 2>(1);
 
-  const [nullifier, setNullifier] = useState<string | null>(null);
   const [result, setResult] = useState<VoteSubmissionResult | null>(null);
-  const [ledger, setLedger] = useState(getPublicLedgerVotes());
+  const [ledger, setLedger] = useState({
+    registeredVoters: 0,
+    totalVotes: 0,
+  });
   const [error, setError] = useState<string | null>(null);
 
   const [serverOnline, setServerOnline] = useState(false);
 
   useEffect(() => {
-    checkProofServerHealth().then((r) => setServerOnline(r.status));
+    checkMidnightHealth()
+      .then((r) => {
+        setServerOnline(r.status);
+        setLedger({
+          registeredVoters: r.registeredVoters,
+          totalVotes: r.totalVotes,
+        });
+      })
+      .catch(() => setServerOnline(false));
+
     return () => stopCamera();
   }, []);
 
@@ -68,12 +75,18 @@ export default function ExpressVotingPage() {
     }
   };
 
+  const maskDni = (value: string) => {
+    const digits = value.replace(/\D/g, '');
+    return `••••${digits.slice(-4)}`;
+  };
+
   // When a barcode is detected automatically
   const onCodeDetected = async (raw: string) => {
     stopCamera();
     setError(null);
 
     const parsed = parseArgentineDniPdf417(raw);
+
     if (!parsed) {
       setError('Código no reconocido. Volvé a enfocar el código de barras del dorso de tu DNI.');
       setStep('idle');
@@ -85,36 +98,53 @@ export default function ExpressVotingPage() {
     setStep('verifying');
 
     try {
-      const govRes = await verifyDniWithGovernmentApi(parsed.data);
-      if (!govRes.valid) {
-        setError(govRes.message);
+      const eligibility = await verifyVoterEligibility(
+        String(parsed.data.dniNumber)
+      );
+
+      if (!eligibility.eligible) {
+        setError(
+          eligibility.message ||
+          'Este DNI no pertenece al padrón privado de esta elección.'
+        );
         setStep('idle');
         return;
       }
 
-      const { nullifierHex } = await computeDniNullifier(parsed.data);
-      setNullifier(nullifierHex);
       setStep('voting');
     } catch (err: any) {
-      setError(err?.message || 'Error al verificar en RENAPER.');
+      setError(
+        err?.message ||
+        'No se pudo verificar la elegibilidad en Midnight.'
+      );
       setStep('idle');
     }
   };
 
   // Cast the vote
   const handleVote = async () => {
-    if (!dniData || !nullifier) return;
+    if (!dniData) return;
+
     setError(null);
     setStep('submitting');
 
     try {
-      const birthYear = new Date(dniData.birthDate).getFullYear();
-      const res = await submitVoteToMidnight(nullifier, selectedCandidate, birthYear);
+      const res = await submitRealVote(
+        String(dniData.dniNumber),
+        selectedCandidate
+      );
+
       setResult(res);
-      setLedger(res.updatedLedger);
+      setLedger((current) => ({
+        ...current,
+        totalVotes: res.totalVotes,
+      }));
       setStep('done');
     } catch (err: any) {
-      setError(err?.message || 'Error al emitir el voto.');
+      setError(
+        err?.message ||
+        'El contrato Midnight rechazó el voto.'
+      );
       setStep('voting');
     }
   };
@@ -192,9 +222,9 @@ export default function ExpressVotingPage() {
             <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 16, padding: '32px 0' }}>
               <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="var(--accent-purple)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ animation: 'pulse-ring 1.2s ease infinite' }}><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
               <div style={{ textAlign: 'center' }}>
-                <h3 style={{ fontSize: 18, fontWeight: 700 }}>Verificando en RENAPER...</h3>
+                <h3 style={{ fontSize: 18, fontWeight: 700 }}>Verificando padrón privado...</h3>
                 <p style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 4 }}>
-                  Comprobando validez del documento y mayoría de edad.
+                  Verificando elegibilidad mediante el contrato Midnight.
                 </p>
               </div>
             </div>
@@ -209,7 +239,7 @@ export default function ExpressVotingPage() {
                 <div>
                   <div style={{ fontSize: 14, fontWeight: 700 }}>{personName}</div>
                   <div style={{ fontSize: 11, color: 'var(--text-muted)' }} className="font-mono">
-                    DNI {dniData.dniNumber} • RENAPER ✓
+                    DNI {maskDni(String(dniData.dniNumber))} • Padrón privado ✓
                   </div>
                 </div>
               </div>
@@ -273,8 +303,8 @@ export default function ExpressVotingPage() {
               <div style={{ width: '100%', padding: 16, borderRadius: 16, background: 'rgba(0,0,0,0.3)', border: '1px solid var(--border-subtle)' }}>
                 <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 4 }}>Opción elegida</div>
                 <div style={{ fontSize: 15, fontWeight: 700, color: selectedCandidate === 1 ? '#10b981' : '#3b82f6' }}>{result.candidateName}</div>
-                <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 12, marginBottom: 4 }}>Prueba ZK</div>
-                <div className="font-mono" style={{ fontSize: 10, color: '#a78bfa', wordBreak: 'break-all', lineHeight: 1.6 }}>{result.proofHash}</div>
+                <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 12, marginBottom: 4 }}>Vote commitment</div>
+                <div className="font-mono" style={{ fontSize: 10, color: '#a78bfa', wordBreak: 'break-all', lineHeight: 1.6 }}>{result.voteCommitment}</div>
               </div>
 
               <button className="btn-primary" onClick={handleReset} style={{ width: '100%', padding: '14px', fontSize: 14 }}>
@@ -299,15 +329,16 @@ export default function ExpressVotingPage() {
             <span style={{ fontWeight: 600 }}>Ledger Midnight</span>
           </div>
           <div className="font-mono" style={{ display: 'flex', gap: 16, fontWeight: 700, fontSize: 13 }}>
-            <span style={{ color: '#10b981' }}>A: {ledger.votesCandidateA}</span>
-            <span style={{ color: '#3b82f6' }}>B: {ledger.votesCandidateB}</span>
+            <span style={{ color: '#a78bfa' }}>
+              Votos emitidos: {ledger.totalVotes}
+            </span>
           </div>
         </div>
 
         {/* Server status */}
         <div style={{ textAlign: 'center', fontSize: 11, color: 'var(--text-muted)', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6 }}>
           <div style={{ width: 6, height: 6, borderRadius: 999, background: serverOnline ? '#10b981' : '#f59e0b' }} />
-          <span>Proof Server {serverOnline ? 'conectado' : 'simulación local'}</span>
+          <span>Midnight {serverOnline ? 'conectado' : 'offline'}</span>
         </div>
       </div>
     </div>
