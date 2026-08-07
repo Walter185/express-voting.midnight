@@ -2,16 +2,21 @@ pragma language_version 0.23;
 
 import CompactStandardLibrary;
 
-// ------------------------------------------------------------
 // Express Voting.Midnight
 //
-// First technical milestone:
-// - fixed voter registry using a Historic Merkle Tree
-// - private voter secret
-// - anonymous membership proof
-// - nullifier preventing a second vote
-// - private ballot commitment storage
-// ------------------------------------------------------------
+// Private:
+// - DNI encoded as Bytes<32>
+// - voterSecret
+// - Merkle membership path
+//
+// Public:
+// - electionId
+// - voter registry
+// - used nullifiers
+// - vote commitments
+// - aggregate vote count
+
+export ledger electionId: Bytes<32>;
 
 export ledger voterRegistry: HistoricMerkleTree<10, Bytes<32>>;
 export ledger usedNullifiers: Set<Bytes<32>>;
@@ -21,55 +26,58 @@ export ledger registeredVoterCount: Counter;
 export ledger totalVotes: Counter;
 
 
-// Private data supplied by the voter's local client.
+// Supplied privately by the voter's local client.
+witness voterDni(): Bytes<32>;
 witness voterSecret(): Bytes<32>;
 
 
-// Private Merkle membership path supplied locally.
+// Supplied privately by the client for Merkle membership.
 witness findVoterPath(
   commitment: Bytes<32>
 ): MerkleTreePath<10, Bytes<32>>;
 
 
-// Domain-separated voter commitment.
+// Voter identity commitment.
 //
-// Later we will incorporate the scanned DNI into this derivation.
-// For the first compile milestone we bind the registry to voterSecret.
+// DNI is never disclosed.
+// Secret prevents brute-force enumeration of DNI numbers.
 export circuit deriveVoterCommitment(
+  dni: Bytes<32>,
   secret: Bytes<32>
 ): Bytes<32> {
-  return persistentHash<Vector<2, Bytes<32>>>([
+  return persistentHash<Vector<3, Bytes<32>>>([
     pad(32, "express-voting:voter"),
+    dni,
     secret
   ]);
 }
 
 
-// Domain-separated nullifier.
-//
-// Same voterSecret => same nullifier for this election.
-// Therefore the voting right can only be consumed once.
+// One voting right per voter for this election.
 export circuit deriveVoterNullifier(
-  secret: Bytes<32>
+  secret: Bytes<32>,
+  election: Bytes<32>
 ): Bytes<32> {
-  return persistentHash<Vector<2, Bytes<32>>>([
+  return persistentHash<Vector<3, Bytes<32>>>([
     pad(32, "express-voting:nullifier"),
+    election,
     secret
   ]);
 }
 
 
-// Demo election: three pre-authorized voter commitments.
+// Three demo voters are inserted when the contract is deployed.
+// These are commitments only.
 //
-// voterA / voterB / voterC are generated off-chain from
-// three demo voter secrets before deployment.
-//
-// Raw DNI numbers and secrets are NEVER stored on-chain.
+// No DNI and no voterSecret are stored publicly.
 constructor(
+  election: Bytes<32>,
   voterA: Bytes<32>,
   voterB: Bytes<32>,
   voterC: Bytes<32>
 ) {
+  electionId = disclose(election);
+
   voterRegistry.insert(disclose(voterA));
   voterRegistry.insert(disclose(voterB));
   voterRegistry.insert(disclose(voterC));
@@ -78,15 +86,13 @@ constructor(
 }
 
 
-// Proves:
-// 1. caller knows a private voterSecret
-// 2. its commitment belongs to the voter registry
-// 3. its voting right has not been consumed
+// Checks eligibility without consuming the voting right.
 export circuit verifyVoter(): [] {
+  const dni = voterDni();
   const secret = voterSecret();
 
   const commitment =
-    deriveVoterCommitment(secret);
+    deriveVoterCommitment(dni, secret);
 
   const path =
     findVoterPath(commitment);
@@ -100,7 +106,10 @@ export circuit verifyVoter(): [] {
   );
 
   const nullifier =
-    deriveVoterNullifier(secret);
+    deriveVoterNullifier(
+      secret,
+      electionId
+    );
 
   assert(
     !usedNullifiers.member(disclose(nullifier)),
@@ -109,21 +118,16 @@ export circuit verifyVoter(): [] {
 }
 
 
-// Casts one private ballot.
-//
-// voteCommitment will later represent:
-//   LIST A
-//   LIST B
-//   BLANK
-//
-// without publishing which option was selected.
+// Consumes the voting right and stores only
+// a commitment to the private ballot.
 export circuit castVote(
   voteCommitment: Bytes<32>
 ): [] {
+  const dni = voterDni();
   const secret = voterSecret();
 
   const commitment =
-    deriveVoterCommitment(secret);
+    deriveVoterCommitment(dni, secret);
 
   const path =
     findVoterPath(commitment);
@@ -137,14 +141,19 @@ export circuit castVote(
   );
 
   const nullifier =
-    deriveVoterNullifier(secret);
+    deriveVoterNullifier(
+      secret,
+      electionId
+    );
 
   assert(
     !usedNullifiers.member(disclose(nullifier)),
     "Voter has already voted"
   );
 
-  usedNullifiers.insert(disclose(nullifier));
+  usedNullifiers.insert(
+    disclose(nullifier)
+  );
 
   voteCommitments.insert(
     disclose(voteCommitment)
