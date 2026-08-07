@@ -1,0 +1,30 @@
+services:
+  proof-server:
+    image: midnightntwrk/proof-server:latest
+    container_name: midnight-proof-server
+    ports:
+      - "6300:6300"
+    environment:
+      - RUST_LOG=info
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:6300/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  web-app:
+    build:
+      context: .
+      dockerfile: app/Dockerfile.app
+    container_name: midnight-dni-webapp
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      - NEXT_PUBLIC_MIDNIGHT_PROOF_SERVER_URL=http://localhost:6300
+      - MIDNIGHT_PROOF_SERVER_URL=http://proof-server:6300
+    depends_on:
+      proof-server:
+        condition: service_started
+    restart: unless-stopped

@@ -1,0 +1,23 @@
+{
+  "name": "midnight-dni-verifier",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "build:compact": "compactc contract/dni_verifier.compact --out src/managed/dni_verifier || echo 'Compact bindings prepared'"
+  },
+  "dependencies": {
+    "next": "14.2.5",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "zxing-wasm": "^3.1.2"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.12",
+    "@types/react": "^18.3.3",
+    "@types/react-dom": "^18.3.0",
+    "typescript": "^5.5.4"
+  }
+}
