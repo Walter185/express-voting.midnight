@@ -1,29 +1,10 @@
 'use client';
 
-import React, { useState, useEffect, useRef } from 'react';
-import {
-  ShieldCheck,
-  Vote,
-  CheckCircle2,
-  Scan,
-  Database,
-  Server,
-  RefreshCw,
-  EyeOff,
-  Sparkles,
-  UserCheck,
-  Camera,
-  ArrowRight,
-  AlertTriangle,
-  Award,
-  VideoOff,
-  Upload,
-} from 'lucide-react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   DniArgentinaData,
   verifyDniWithGovernmentApi,
   computeDniNullifier,
-  GovernmentValidationResult,
 } from '@/lib/argentinaDni';
 import { parseArgentineDniPdf417 } from '@/lib/dniScanner';
 import { startNativeCamera, CameraControl } from '@/lib/cameraScanner';
@@ -34,398 +15,301 @@ import {
   VoteSubmissionResult,
 } from '@/lib/midnight';
 
-export default function MidnightUltraSimpleVotingPage() {
-  // Estado del flujo: 'idle' | 'camera' | 'verifying' | 'voting' | 'voted'
-  const [step, setStep] = useState<'idle' | 'camera' | 'verifying' | 'voting' | 'voted'>('idle');
+type AppStep = 'idle' | 'scanning' | 'verifying' | 'voting' | 'submitting' | 'done';
 
-  // Referencia de la cámara nativa
+export default function ExpressVotingPage() {
+  const [step, setStep] = useState<AppStep>('idle');
   const videoRef = useRef<HTMLVideoElement | null>(null);
-  const cameraControlRef = useRef<CameraControl | null>(null);
+  const cameraRef = useRef<CameraControl | null>(null);
 
-  // Datos extraídos del DNI
-  const [extractedDni, setExtractedDni] = useState<DniArgentinaData | null>(null);
-  const [extractedName, setExtractedName] = useState<string>('');
-
-  // Selección de Candidato (1 = Candidato A, 2 = Candidato B)
+  const [dniData, setDniData] = useState<DniArgentinaData | null>(null);
+  const [personName, setPersonName] = useState('');
   const [selectedCandidate, setSelectedCandidate] = useState<1 | 2>(1);
 
-  // Estados de la app
-  const [isVerifyingRenaper, setIsVerifyingRenaper] = useState(false);
-  const [isSubmittingVote, setIsSubmittingVote] = useState(false);
-  const [serverStatus, setServerStatus] = useState<{ status: boolean; message: string } | null>(null);
-
-  // Resultados ZK
-  const [dniNullifier, setDniNullifier] = useState<string | null>(null);
-  const [voteResult, setVoteResult] = useState<VoteSubmissionResult | null>(null);
-  const [ledgerVotes, setLedgerVotes] = useState(getPublicLedgerVotes());
+  const [nullifier, setNullifier] = useState<string | null>(null);
+  const [result, setResult] = useState<VoteSubmissionResult | null>(null);
+  const [ledger, setLedger] = useState(getPublicLedgerVotes());
   const [error, setError] = useState<string | null>(null);
 
-  // Salud del Proof Server
-  useEffect(() => {
-    async function initHealthCheck() {
-      const res = await checkProofServerHealth();
-      setServerStatus(res);
-    }
-    initHealthCheck();
+  const [serverOnline, setServerOnline] = useState(false);
 
-    return () => {
-      stopCamera();
-    };
+  useEffect(() => {
+    checkProofServerHealth().then((r) => setServerOnline(r.status));
+    return () => stopCamera();
   }, []);
 
-  // Botón Principal: Abrir cámara e iniciar escaneo automático
-  const handleOpenScanner = async () => {
+  const stopCamera = useCallback(() => {
+    cameraRef.current?.stop();
+    cameraRef.current = null;
+  }, []);
+
+  // The main scan button action
+  const handleScan = async () => {
     setError(null);
-    setStep('camera');
+    setStep('scanning');
 
-    setTimeout(async () => {
-      if (videoRef.current) {
-        try {
-          const ctrl = await startNativeCamera(videoRef.current, (scannedCode) => {
-            // Detección automática instantánea sin presionar nada más
-            handleAutoDetectDni(scannedCode);
-          });
-          cameraControlRef.current = ctrl;
-        } catch (err: any) {
-          setError('No se pudo acceder a la cámara. Asegúrate de permitir los permisos en el navegador.');
-          setStep('idle');
-        }
-      }
-    }, 100);
-  };
+    // Small delay to let the video element render
+    await new Promise((r) => setTimeout(r, 150));
 
-  // Detener transmisión de la cámara
-  const stopCamera = () => {
-    if (cameraControlRef.current) {
-      cameraControlRef.current.stop();
-      cameraControlRef.current = null;
-    }
-  };
-
-  // Detección y verificación automática de DNI escaneado
-  const handleAutoDetectDni = async (rawCode: string) => {
-    stopCamera();
-    setError(null);
-
-    const parsed = parseArgentineDniPdf417(rawCode);
-    if (!parsed) {
-      setError('Código no reconocido. Enfoca el código de barras PDF417 del dorso del DNI.');
+    if (!videoRef.current) {
+      setError('No se pudo inicializar la cámara.');
       setStep('idle');
       return;
     }
 
-    setExtractedDni(parsed.data);
-    setExtractedName(parsed.fullName);
-    setIsVerifyingRenaper(true);
+    try {
+      const ctrl = await startNativeCamera(videoRef.current, (code) => {
+        onCodeDetected(code);
+      });
+      cameraRef.current = ctrl;
+    } catch (err: any) {
+      setError(err?.message || 'No se pudo acceder a la cámara.');
+      setStep('idle');
+    }
+  };
+
+  // When a barcode is detected automatically
+  const onCodeDetected = async (raw: string) => {
+    stopCamera();
+    setError(null);
+
+    const parsed = parseArgentineDniPdf417(raw);
+    if (!parsed) {
+      setError('Código no reconocido. Volvé a enfocar el código de barras del dorso de tu DNI.');
+      setStep('idle');
+      return;
+    }
+
+    setDniData(parsed.data);
+    setPersonName(parsed.fullName);
     setStep('verifying');
 
     try {
-      // Verificación en RENAPER / Padrón Electoral
-      const res = await verifyDniWithGovernmentApi(parsed.data);
-
-      if (!res.valid) {
-        setError(res.message);
+      const govRes = await verifyDniWithGovernmentApi(parsed.data);
+      if (!govRes.valid) {
+        setError(govRes.message);
         setStep('idle');
-        setIsVerifyingRenaper(false);
         return;
       }
 
-      // Generar Nullifier Criptográfico ZK
       const { nullifierHex } = await computeDniNullifier(parsed.data);
-      setDniNullifier(nullifierHex);
-
-      // Pasar automáticamente a la pantalla de Votación
-      setIsVerifyingRenaper(false);
+      setNullifier(nullifierHex);
       setStep('voting');
     } catch (err: any) {
-      setError(err?.message || 'Error durante la verificación en RENAPER.');
+      setError(err?.message || 'Error al verificar en RENAPER.');
       setStep('idle');
-      setIsVerifyingRenaper(false);
     }
   };
 
-  // Carga alternativa de archivo si se arrastra un DNI
-  const handleFileDrop = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files && e.target.files[0]) {
-      const file = e.target.files[0];
-      const reader = new FileReader();
-      reader.onload = (ev) => {
-        const text = ev.target?.result as string;
-        if (text) {
-          handleAutoDetectDni(text);
-        }
-      };
-      reader.readAsText(file);
-    }
-  };
-
-  // Emitir Voto Privado ZK en Midnight Network
-  const handleCastVote = async () => {
-    if (!extractedDni || !dniNullifier) return;
-
+  // Cast the vote
+  const handleVote = async () => {
+    if (!dniData || !nullifier) return;
     setError(null);
-    setIsSubmittingVote(true);
+    setStep('submitting');
 
     try {
-      const birthYear = new Date(extractedDni.birthDate).getFullYear();
-
-      const result = await submitVoteToMidnight(
-        dniNullifier,
-        selectedCandidate,
-        birthYear
-      );
-
-      setVoteResult(result);
-      setLedgerVotes(result.updatedLedger);
-      setStep('voted');
+      const birthYear = new Date(dniData.birthDate).getFullYear();
+      const res = await submitVoteToMidnight(nullifier, selectedCandidate, birthYear);
+      setResult(res);
+      setLedger(res.updatedLedger);
+      setStep('done');
     } catch (err: any) {
-      setError(err?.message || 'Error al emitir el voto ZK');
-    } finally {
-      setIsSubmittingVote(false);
+      setError(err?.message || 'Error al emitir el voto.');
+      setStep('voting');
     }
   };
 
-  // Reiniciar flujo para nuevo votante
-  const handleResetAll = () => {
+  const handleReset = () => {
     stopCamera();
     setStep('idle');
-    setExtractedDni(null);
-    setDniNullifier(null);
-    setVoteResult(null);
+    setDniData(null);
+    setResult(null);
     setError(null);
   };
 
   return (
-    <main className="min-h-screen midnight-bg flex flex-col items-center justify-center p-4">
-      {/* Contenedor Principal Elegante */}
-      <div className="w-full max-w-xl mx-auto space-y-6">
-        {/* Encabezado Minimalista */}
-        <div className="text-center space-y-2">
-          <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-purple-500/10 border border-purple-500/20 text-purple-400 text-xs font-semibold">
-            <ShieldCheck className="w-4 h-4" />
-            <span>Midnight Network • Privacidad ZK</span>
+    <div style={{ minHeight: '100vh', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: '24px' }}>
+      <div style={{ width: '100%', maxWidth: 480, display: 'flex', flexDirection: 'column', gap: 24 }}>
+
+        {/* Header */}
+        <div style={{ textAlign: 'center' }}>
+          <div style={{ display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 14px', borderRadius: 999, background: 'rgba(139, 92, 246, 0.1)', border: '1px solid rgba(139, 92, 246, 0.2)', fontSize: 11, fontWeight: 600, color: '#a78bfa', letterSpacing: 0.5, marginBottom: 12 }}>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+            Midnight Network • ZK Privacy
           </div>
-          <h1 className="text-3xl font-extrabold tracking-tight text-white">
-            Votación Privada Express
+          <h1 style={{ fontSize: 32, fontWeight: 800, letterSpacing: -1, background: 'linear-gradient(135deg, #f1f5f9, #a78bfa)', WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent', lineHeight: 1.1 }}>
+            Express Voting
           </h1>
-          <p className="text-sm text-slate-400">
-            Escanea tu DNI Argentino para verificar en RENAPER y emitir tu voto anónimo.
+          <p style={{ fontSize: 13, color: 'var(--text-secondary)', marginTop: 8, lineHeight: 1.5 }}>
+            Escaneá tu DNI argentino para votar de forma anónima y verificable.
           </p>
         </div>
 
-        {/* Card Principal Glassmorphic */}
-        <div className="glass-panel-glow rounded-3xl p-8 border border-purple-500/20 shadow-2xl relative overflow-hidden">
-          {/* PASO 1: Inicio / Botón Escanear */}
+        {/* Main Card */}
+        <div className="glass-card-glow" style={{ padding: 32, position: 'relative', overflow: 'hidden' }}>
+
+          {/* IDLE: Show scan button */}
           {step === 'idle' && (
-            <div className="text-center space-y-6 py-4">
-              <div className="w-20 h-20 mx-auto rounded-3xl bg-gradient-to-br from-purple-600 to-indigo-600 flex items-center justify-center text-white shadow-xl shadow-purple-600/30">
-                <Scan className="w-10 h-10" />
+            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 24 }}>
+              <div style={{ width: 88, height: 88, borderRadius: 28, background: 'linear-gradient(135deg, #8b5cf6, #6366f1)', display: 'flex', alignItems: 'center', justifyContent: 'center', boxShadow: '0 8px 32px rgba(139, 92, 246, 0.3)' }}>
+                <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 7V5a2 2 0 0 1 2-2h2"/><path d="M17 3h2a2 2 0 0 1 2 2v2"/><path d="M21 17v2a2 2 0 0 1-2 2h-2"/><path d="M7 21H5a2 2 0 0 1-2-2v-2"/><line x1="7" y1="12" x2="17" y2="12"/></svg>
               </div>
-
-              <div className="space-y-1">
-                <h2 className="text-xl font-bold text-white">Verificación de DNI</h2>
-                <p className="text-xs text-slate-400">
-                  Presiona el botón para abrir la cámara y detectar automáticamente tu DNI.
+              <div style={{ textAlign: 'center' }}>
+                <h2 style={{ fontSize: 20, fontWeight: 700 }}>Escanear DNI</h2>
+                <p style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 4 }}>
+                  Se abrirá la cámara y se detectará el código automáticamente.
                 </p>
               </div>
-
-              {/* Botón Principal Destacado */}
-              <button
-                type="button"
-                onClick={handleOpenScanner}
-                className="w-full py-4 px-8 rounded-2xl font-bold text-lg text-white bg-gradient-to-r from-purple-600 via-indigo-600 to-blue-600 hover:from-purple-500 hover:to-blue-500 shadow-xl shadow-purple-600/30 transition-all duration-300 transform hover:scale-[1.02] flex items-center justify-center gap-3"
-              >
-                <Camera className="w-6 h-6" />
-                <span>Escanear DNI</span>
+              <button className="btn-primary" onClick={handleScan} style={{ width: '100%', padding: '16px 24px', fontSize: 16, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 10 }}>
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
+                Escanear DNI
               </button>
-
-              <div className="pt-2">
-                <label className="text-xs text-slate-500 hover:text-slate-400 cursor-pointer underline flex items-center justify-center gap-1">
-                  <Upload className="w-3.5 h-3.5" />
-                  <span>O sube una imagen de tu DNI</span>
-                  <input type="file" accept="image/*,.txt" onChange={handleFileDrop} className="hidden" />
-                </label>
-              </div>
             </div>
           )}
 
-          {/* PASO 2: Cámara Abierta con Detección Automática */}
-          {step === 'camera' && (
-            <div className="space-y-4">
-              <div className="relative rounded-2xl overflow-hidden bg-black border-2 border-purple-500 aspect-video flex items-center justify-center">
-                <video
-                  ref={videoRef}
-                  autoPlay
-                  playsInline
-                  muted
-                  className="w-full h-full object-cover"
-                />
-                <div className="absolute inset-0 border-2 border-dashed border-purple-400/80 m-6 rounded-xl pointer-events-none flex items-center justify-center">
-                  <div className="bg-black/70 backdrop-blur-md text-purple-300 px-4 py-2 rounded-full text-xs font-semibold flex items-center gap-2 shadow-lg">
-                    <RefreshCw className="w-4 h-4 animate-spin text-purple-400" />
-                    <span>Enfoca el código del dorso del DNI...</span>
+          {/* SCANNING: Camera viewfinder */}
+          {step === 'scanning' && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+              <div className="viewfinder">
+                <video ref={videoRef} autoPlay playsInline muted />
+                <div className="viewfinder-overlay">
+                  <div className="viewfinder-corners" />
+                  <div className="animate-scan-sweep" />
+                  <div style={{ position: 'absolute', bottom: 20, background: 'rgba(0,0,0,0.75)', backdropFilter: 'blur(8px)', padding: '8px 16px', borderRadius: 999, fontSize: 11, fontWeight: 600, color: '#c4b5fd', display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" style={{ animation: 'pulse-ring 1.5s ease infinite' }}><path d="M3 7V5a2 2 0 0 1 2-2h2"/><path d="M17 3h2a2 2 0 0 1 2 2v2"/><path d="M21 17v2a2 2 0 0 1-2 2h-2"/><path d="M7 21H5a2 2 0 0 1-2-2v-2"/></svg>
+                    Enfocá el código de barras del dorso
                   </div>
                 </div>
               </div>
-
-              <button
-                type="button"
-                onClick={() => {
-                  stopCamera();
-                  setStep('idle');
-                }}
-                className="w-full py-3 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold transition-colors border border-slate-700"
-              >
-                Cancelar Cámara
+              <button onClick={() => { stopCamera(); setStep('idle'); }} style={{ width: '100%', padding: '12px', borderRadius: 12, background: 'rgba(255,255,255,0.05)', border: '1px solid var(--border-subtle)', color: 'var(--text-secondary)', fontSize: 13, fontWeight: 600, cursor: 'pointer' }}>
+                Cancelar
               </button>
             </div>
           )}
 
-          {/* PASO 3: Verificando RENAPER Automáticamente */}
+          {/* VERIFYING: Loading spinner */}
           {step === 'verifying' && (
-            <div className="text-center space-y-4 py-8">
-              <RefreshCw className="w-12 h-12 mx-auto text-purple-400 animate-spin" />
-              <div className="space-y-1">
-                <h3 className="text-lg font-bold text-white">Verificando en RENAPER...</h3>
-                <p className="text-xs text-purple-300">
-                  Comprobando validez en Padrón Electoral y mayoría de edad (&gt;= 18 años).
+            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 16, padding: '32px 0' }}>
+              <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="var(--accent-purple)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ animation: 'pulse-ring 1.2s ease infinite' }}><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
+              <div style={{ textAlign: 'center' }}>
+                <h3 style={{ fontSize: 18, fontWeight: 700 }}>Verificando en RENAPER...</h3>
+                <p style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 4 }}>
+                  Comprobando validez del documento y mayoría de edad.
                 </p>
               </div>
             </div>
           )}
 
-          {/* PASO 4: Votación de Candidatos */}
-          {(step === 'voting' || step === 'voted') && extractedDni && (
-            <div className="space-y-6">
-              {/* Badge DNI Validado */}
-              <div className="p-3.5 rounded-2xl bg-emerald-950/50 border border-emerald-500/40 flex items-center justify-between text-xs">
-                <div className="flex items-center gap-2.5">
-                  <UserCheck className="w-5 h-5 text-emerald-400" />
-                  <div>
-                    <span className="font-bold text-white">{extractedName}</span>
-                    <span className="text-emerald-400 block text-[11px]">DNI Validado en RENAPER ✓</span>
+          {/* VOTING: Candidate selection */}
+          {(step === 'voting' || step === 'submitting') && dniData && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+              {/* Verified badge */}
+              <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '12px 16px', borderRadius: 16, background: 'rgba(16, 185, 129, 0.06)', border: '1px solid rgba(16, 185, 129, 0.2)' }}>
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#10b981" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+                <div>
+                  <div style={{ fontSize: 14, fontWeight: 700 }}>{personName}</div>
+                  <div style={{ fontSize: 11, color: 'var(--text-muted)' }} className="font-mono">
+                    DNI {dniData.dniNumber} • RENAPER ✓
                   </div>
                 </div>
-                <button
-                  onClick={handleResetAll}
-                  className="text-[11px] px-2.5 py-1 rounded-lg bg-slate-800 text-slate-300 hover:bg-slate-700"
-                >
-                  Cambiar
-                </button>
               </div>
 
-              {/* Opciones de Candidatos */}
-              {step === 'voting' && (
-                <div className="space-y-4">
-                  <h3 className="text-sm font-bold text-slate-300">Selecciona tu Voto Secreto:</h3>
+              <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--text-secondary)' }}>
+                Elegí tu candidato:
+              </div>
 
-                  <div className="grid grid-cols-2 gap-4">
-                    {/* Candidato A */}
-                    <button
-                      type="button"
-                      onClick={() => setSelectedCandidate(1)}
-                      className={`p-4 rounded-2xl border text-left transition-all ${
-                        selectedCandidate === 1
-                          ? 'bg-emerald-950/50 border-emerald-500 shadow-lg shadow-emerald-500/10'
-                          : 'bg-slate-900/60 border-slate-800 hover:border-slate-700'
-                      }`}
-                    >
-                      <span className="text-xs font-semibold px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-400">
-                        Lista Verde
-                      </span>
-                      <h4 className="text-base font-bold text-white mt-2">Candidato A</h4>
-                    </button>
-
-                    {/* Candidato B */}
-                    <button
-                      type="button"
-                      onClick={() => setSelectedCandidate(2)}
-                      className={`p-4 rounded-2xl border text-left transition-all ${
-                        selectedCandidate === 2
-                          ? 'bg-blue-950/50 border-blue-500 shadow-lg shadow-blue-500/10'
-                          : 'bg-slate-900/60 border-slate-800 hover:border-slate-700'
-                      }`}
-                    >
-                      <span className="text-xs font-semibold px-2 py-0.5 rounded bg-blue-500/20 text-blue-400">
-                        Lista Azul
-                      </span>
-                      <h4 className="text-base font-bold text-white mt-2">Candidato B</h4>
-                    </button>
-                  </div>
-
-                  {/* Botón de Votación Final */}
-                  <button
-                    type="button"
-                    onClick={handleCastVote}
-                    disabled={isSubmittingVote}
-                    className="w-full py-4 rounded-2xl font-bold text-white bg-gradient-to-r from-purple-600 via-indigo-600 to-blue-600 hover:from-purple-500 hover:to-blue-500 shadow-lg shadow-purple-600/30 transition-all flex items-center justify-center gap-2"
-                  >
-                    {isSubmittingVote ? (
-                      <>
-                        <RefreshCw className="w-5 h-5 animate-spin" />
-                        <span>Emitiendo Prueba ZK en Midnight...</span>
-                      </>
-                    ) : (
-                      <>
-                        <Sparkles className="w-5 h-5" />
-                        <span>Emitir Voto Privado ZK</span>
-                      </>
-                    )}
-                  </button>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+                <div
+                  className={`candidate-card ${selectedCandidate === 1 ? 'selected-a' : ''}`}
+                  onClick={() => step === 'voting' && setSelectedCandidate(1)}
+                >
+                  <div style={{ fontSize: 11, fontWeight: 700, color: '#10b981', letterSpacing: 0.5, marginBottom: 8 }}>LISTA VERDE</div>
+                  <div style={{ fontSize: 18, fontWeight: 800 }}>Candidato A</div>
+                  {selectedCandidate === 1 && (
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#10b981" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" style={{ marginTop: 8 }}><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+                  )}
                 </div>
-              )}
-
-              {/* Confirmación del Voto Registrado */}
-              {step === 'voted' && voteResult && (
-                <div className="space-y-4 text-center py-2">
-                  <div className="w-16 h-16 mx-auto rounded-full bg-emerald-500/20 text-emerald-400 flex items-center justify-center">
-                    <Award className="w-8 h-8" />
-                  </div>
-                  <h3 className="text-xl font-extrabold text-white">¡Voto Registrado con Éxito!</h3>
-
-                  <div className="p-4 rounded-2xl bg-slate-950 border border-slate-800 text-left text-xs space-y-2">
-                    <div>
-                      <span className="text-slate-400">Opción Elegida:</span>
-                      <div className="font-bold text-emerald-400">{voteResult.candidateName}</div>
-                    </div>
-                    <div>
-                      <span className="text-slate-400">Prueba ZK:</span>
-                      <div className="font-mono-code text-[11px] text-purple-300 break-all">{voteResult.proofHash}</div>
-                    </div>
-                  </div>
-
-                  <button
-                    onClick={handleResetAll}
-                    className="w-full py-3 rounded-xl bg-purple-600 hover:bg-purple-500 text-white font-semibold text-xs transition-colors"
-                  >
-                    Escanear Otro DNI
-                  </button>
+                <div
+                  className={`candidate-card ${selectedCandidate === 2 ? 'selected-b' : ''}`}
+                  onClick={() => step === 'voting' && setSelectedCandidate(2)}
+                >
+                  <div style={{ fontSize: 11, fontWeight: 700, color: '#3b82f6', letterSpacing: 0.5, marginBottom: 8 }}>LISTA AZUL</div>
+                  <div style={{ fontSize: 18, fontWeight: 800 }}>Candidato B</div>
+                  {selectedCandidate === 2 && (
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#3b82f6" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" style={{ marginTop: 8 }}><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+                  )}
                 </div>
-              )}
+              </div>
+
+              <button className="btn-primary" onClick={handleVote} disabled={step === 'submitting'} style={{ width: '100%', padding: '16px', fontSize: 15, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8 }}>
+                {step === 'submitting' ? (
+                  <>
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" style={{ animation: 'pulse-ring 1s ease infinite' }}><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
+                    Emitiendo prueba ZK...
+                  </>
+                ) : (
+                  <>
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+                    Emitir Voto Privado
+                  </>
+                )}
+              </button>
             </div>
           )}
 
-          {/* Mensajes de Error */}
-          {error && (
-            <div className="mt-4 p-4 rounded-2xl bg-red-950/80 border border-red-800 text-red-200 text-xs flex items-center gap-3">
-              <AlertTriangle className="w-5 h-5 text-red-400 shrink-0" />
-              <div>{error}</div>
+          {/* DONE: Success */}
+          {step === 'done' && result && (
+            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 20, padding: '8px 0' }}>
+              <div style={{ width: 72, height: 72, borderRadius: 999, background: 'rgba(16, 185, 129, 0.1)', border: '2px solid rgba(16, 185, 129, 0.3)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="#10b981" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+              </div>
+              <div style={{ textAlign: 'center' }}>
+                <h3 style={{ fontSize: 22, fontWeight: 800 }}>¡Voto Registrado!</h3>
+                <p style={{ fontSize: 13, color: 'var(--text-muted)', marginTop: 4 }}>
+                  Tu voto fue emitido de forma anónima en Midnight Network.
+                </p>
+              </div>
+
+              <div style={{ width: '100%', padding: 16, borderRadius: 16, background: 'rgba(0,0,0,0.3)', border: '1px solid var(--border-subtle)' }}>
+                <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 4 }}>Opción elegida</div>
+                <div style={{ fontSize: 15, fontWeight: 700, color: selectedCandidate === 1 ? '#10b981' : '#3b82f6' }}>{result.candidateName}</div>
+                <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 12, marginBottom: 4 }}>Prueba ZK</div>
+                <div className="font-mono" style={{ fontSize: 10, color: '#a78bfa', wordBreak: 'break-all', lineHeight: 1.6 }}>{result.proofHash}</div>
+              </div>
+
+              <button className="btn-primary" onClick={handleReset} style={{ width: '100%', padding: '14px', fontSize: 14 }}>
+                Escanear otro DNI
+              </button>
             </div>
           )}
         </div>
 
-        {/* Escrutinio Público del Ledger */}
-        <div className="glass-panel rounded-2xl p-4 flex items-center justify-between text-xs text-slate-300">
-          <div className="flex items-center gap-2">
-            <Database className="w-4 h-4 text-purple-400" />
-            <span className="font-semibold">Ledger Público Midnight:</span>
+        {/* Error message */}
+        {error && (
+          <div style={{ padding: '14px 18px', borderRadius: 16, background: 'rgba(239, 68, 68, 0.08)', border: '1px solid rgba(239, 68, 68, 0.2)', display: 'flex', alignItems: 'flex-start', gap: 10, fontSize: 12, color: '#fca5a5' }}>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ef4444" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0, marginTop: 1 }}><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+            <div>{error}</div>
           </div>
-          <div className="flex gap-4 font-mono-code font-bold">
-            <span className="text-emerald-400">A: {ledgerVotes.votesCandidateA}</span>
-            <span className="text-blue-400">B: {ledgerVotes.votesCandidateB}</span>
+        )}
+
+        {/* Ledger bar */}
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '12px 18px', borderRadius: 16, background: 'var(--bg-card)', border: '1px solid var(--border-subtle)', fontSize: 12 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, color: 'var(--text-muted)' }}>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--accent-purple)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>
+            <span style={{ fontWeight: 600 }}>Ledger Midnight</span>
           </div>
+          <div className="font-mono" style={{ display: 'flex', gap: 16, fontWeight: 700, fontSize: 13 }}>
+            <span style={{ color: '#10b981' }}>A: {ledger.votesCandidateA}</span>
+            <span style={{ color: '#3b82f6' }}>B: {ledger.votesCandidateB}</span>
+          </div>
+        </div>
+
+        {/* Server status */}
+        <div style={{ textAlign: 'center', fontSize: 11, color: 'var(--text-muted)', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6 }}>
+          <div style={{ width: 6, height: 6, borderRadius: 999, background: serverOnline ? '#10b981' : '#f59e0b' }} />
+          <span>Proof Server {serverOnline ? 'conectado' : 'simulación local'}</span>
         </div>
       </div>
-    </main>
+    </div>
   );
 }
