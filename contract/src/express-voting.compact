@@ -19,16 +19,31 @@ import CompactStandardLibrary;
 export ledger electionId: Bytes<32>;
 
 export ledger voterRegistry: HistoricMerkleTree<10, Bytes<32>>;
+export ledger registeredVoterCommitments: Set<Bytes<32>>;
 export ledger usedNullifiers: Set<Bytes<32>>;
 export ledger voteCommitments: Set<Bytes<32>>;
 
 export ledger registeredVoterCount: Counter;
 export ledger totalVotes: Counter;
 
+// Election lifecycle.
+export ledger votingStart: Uint<64>;
+export ledger votingEnd: Uint<64>;
+export ledger votingConfigured: Boolean;
+export ledger electionClosed: Boolean;
+
+// Hash of the private administrator secret.
+// It is fixed when the contract is deployed.
+export sealed ledger adminCommitment: Bytes<32>;
+
 
 // Supplied privately by the voter's local client.
 witness voterDni(): Bytes<32>;
 witness voterSecret(): Bytes<32>;
+
+// Supplied privately by the platform backend.
+// Never stored publicly.
+witness adminSecret(): Bytes<32>;
 
 
 // Supplied privately by the client for Merkle membership.
@@ -66,6 +81,20 @@ export circuit deriveVoterNullifier(
 }
 
 
+// Administrator authorization.
+//
+// Only the hash is stored on-chain.
+// The secret remains private.
+export circuit deriveAdminCommitment(
+  secret: Bytes<32>
+): Bytes<32> {
+  return persistentHash<Vector<2, Bytes<32>>>([
+    pad(32, "express-voting:admin"),
+    secret
+  ]);
+}
+
+
 // Three demo voters are inserted when the contract is deployed.
 // These are commitments only.
 //
@@ -82,7 +111,18 @@ constructor(
   voterRegistry.insert(disclose(voterB));
   voterRegistry.insert(disclose(voterC));
 
+  registeredVoterCommitments.insert(disclose(voterA));
+  registeredVoterCommitments.insert(disclose(voterB));
+  registeredVoterCommitments.insert(disclose(voterC));
+
   registeredVoterCount.increment(3);
+
+  adminCommitment = disclose(
+    deriveAdminCommitment(adminSecret())
+  );
+
+  votingConfigured = false;
+  electionClosed = false;
 }
 
 
@@ -118,11 +158,120 @@ export circuit verifyVoter(): [] {
 }
 
 
+// Verifies that the caller possesses the private
+// administrator secret established at deployment.
+circuit assertAdmin(): [] {
+  assert(
+    adminCommitment ==
+      deriveAdminCommitment(adminSecret()),
+    "Not authorized administrator"
+  );
+}
+
+
+// Adds a new voter commitment to the private electoral registry.
+//
+// The DNI and voter secret remain off-chain.
+// Only the commitment is added publicly.
+//
+// The registry becomes immutable once voting starts.
+export circuit addVoter(
+  voterCommitment: Bytes<32>
+): [] {
+  assertAdmin();
+
+  assert(
+    !electionClosed,
+    "Election is permanently closed"
+  );
+
+  assert(
+    !votingConfigured || blockTimeLt(votingStart),
+    "Voter registry is locked after voting starts"
+  );
+
+  assert(
+    !registeredVoterCommitments.member(
+      disclose(voterCommitment)
+    ),
+    "Voter is already registered"
+  );
+
+  voterRegistry.insert(
+    disclose(voterCommitment)
+  );
+
+  registeredVoterCommitments.insert(
+    disclose(voterCommitment)
+  );
+
+  registeredVoterCount.increment(1);
+}
+
+
+// Sets or updates the voting window.
+// Times are Unix timestamps in seconds.
+export circuit setVotingWindow(
+  start: Uint<64>,
+  end: Uint<64>
+): [] {
+  assertAdmin();
+
+  assert(
+    !electionClosed,
+    "Election is permanently closed"
+  );
+
+  assert(
+    disclose(start) < disclose(end),
+    "Voting end must be after voting start"
+  );
+
+  votingStart = disclose(start);
+  votingEnd = disclose(end);
+  votingConfigured = true;
+}
+
+
+// Permanently closes the election.
+// There is intentionally no reopen circuit.
+export circuit closeElection(): [] {
+  assertAdmin();
+
+  assert(
+    !electionClosed,
+    "Election is already closed"
+  );
+
+  electionClosed = true;
+}
+
+
 // Consumes the voting right and stores only
 // a commitment to the private ballot.
 export circuit castVote(
   voteCommitment: Bytes<32>
 ): [] {
+  assert(
+    votingConfigured,
+    "Voting window is not configured"
+  );
+
+  assert(
+    !electionClosed,
+    "Election is closed"
+  );
+
+  assert(
+    blockTimeGte(votingStart),
+    "Voting has not started"
+  );
+
+  assert(
+    blockTimeLt(votingEnd),
+    "Voting has ended"
+  );
+
   const dni = voterDni();
   const secret = voterSecret();
 

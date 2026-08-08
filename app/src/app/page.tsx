@@ -1,19 +1,17 @@
 'use client';
 
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import {
-  DniArgentinaData,
-  verifyDniWithGovernmentApi,
-  computeDniNullifier,
-} from '@/lib/argentinaDni';
+import { DniArgentinaData } from '@/lib/argentinaDni';
 import { parseArgentineDniPdf417 } from '@/lib/dniScanner';
 import { startNativeCamera, CameraControl } from '@/lib/cameraScanner';
 import {
-  checkProofServerHealth,
-  submitVoteToMidnight,
-  getPublicLedgerVotes,
+  checkMidnightHealth,
+  getElectionInfo,
+  verifyVoterEligibility,
+  submitRealVote,
   VoteSubmissionResult,
-} from '@/lib/midnight';
+  ElectionInfo,
+} from '@/lib/midnightReal';
 
 type AppStep = 'idle' | 'scanning' | 'verifying' | 'voting' | 'submitting' | 'done';
 
@@ -26,25 +24,125 @@ export default function ExpressVotingPage() {
   const [personName, setPersonName] = useState('');
   const [selectedCandidate, setSelectedCandidate] = useState<1 | 2>(1);
 
-  const [nullifier, setNullifier] = useState<string | null>(null);
   const [result, setResult] = useState<VoteSubmissionResult | null>(null);
-  const [ledger, setLedger] = useState(getPublicLedgerVotes());
+  const [ledger, setLedger] = useState({
+    registeredVoters: 0,
+    totalVotes: 0,
+  });
   const [error, setError] = useState<string | null>(null);
 
-  const [serverOnline, setServerOnline] = useState(false);
+    const [serverOnline, setServerOnline] = useState(false);
+    const [walletReady, setWalletReady] = useState(false);
+    const [election, setElection] = useState<ElectionInfo | null>(null);
+    const [serverOffset, setServerOffset] = useState(0);
+    const [tick, setTick] = useState(
+      Math.floor(Date.now() / 1000)
+    );
 
-  useEffect(() => {
-    checkProofServerHealth().then((r) => setServerOnline(r.status));
-    return () => stopCamera();
-  }, []);
+    const stopCamera = useCallback(() => {
+      cameraRef.current?.stop();
+      cameraRef.current = null;
+    }, []);
 
-  const stopCamera = useCallback(() => {
-    cameraRef.current?.stop();
-    cameraRef.current = null;
-  }, []);
+    const refreshElection = useCallback(async () => {
+      try {
+        const [health, info] = await Promise.all([
+          checkMidnightHealth(),
+          getElectionInfo(),
+        ]);
 
+        setServerOnline(health.status);
+        setWalletReady(Boolean(health.walletReady));
+        setElection(info);
+
+        setLedger({
+          registeredVoters: info.registeredVoters,
+          totalVotes: info.totalVotes,
+        });
+
+        setServerOffset(
+          info.now - Math.floor(Date.now() / 1000)
+        );
+      } catch {
+        setServerOnline(false);
+        setWalletReady(false);
+      }
+    }, []);
+
+    useEffect(() => {
+      refreshElection();
+
+      const poll = window.setInterval(
+        refreshElection,
+        5000
+      );
+
+      const clock = window.setInterval(() => {
+        setTick(Math.floor(Date.now() / 1000));
+      }, 1000);
+
+      return () => {
+        window.clearInterval(poll);
+        window.clearInterval(clock);
+        stopCamera();
+      };
+    }, [refreshElection, stopCamera]);
+
+    useEffect(() => {
+      if (
+        election &&
+        election.status !== 'ABIERTA' &&
+        step === 'scanning'
+      ) {
+        stopCamera();
+        setStep('idle');
+      }
+    }, [election?.status, step, stopCamera]);
+
+    const effectiveNow =
+      tick + serverOffset;
+
+    const countdownTarget =
+      election?.status === 'PROGRAMADA'
+        ? election.votingStart
+        : election?.status === 'ABIERTA'
+          ? election.votingEnd
+          : 0;
+
+    const countdownSeconds =
+      Math.max(0, countdownTarget - effectiveNow);
+
+    const formatCountdown = (seconds: number) => {
+      const hours = Math.floor(seconds / 3600);
+      const minutes =
+        Math.floor((seconds % 3600) / 60);
+      const secs = seconds % 60;
+
+      return [hours, minutes, secs]
+        .map((value) =>
+          String(value).padStart(2, '0')
+        )
+        .join(' : ');
+    };
+
+    const formatElectionDate = (timestamp: number) => {
+      if (!timestamp) return '—';
+
+      return new Date(timestamp * 1000).toLocaleString(
+        'es-AR',
+        {
+          dateStyle: 'short',
+          timeStyle: 'short',
+        }
+      );
+    };
   // The main scan button action
   const handleScan = async () => {
+      if (election?.status !== 'ABIERTA') {
+        setError('La votación no está abierta.');
+        return;
+      }
+
     setError(null);
     setStep('scanning');
 
@@ -68,12 +166,18 @@ export default function ExpressVotingPage() {
     }
   };
 
+  const maskDni = (value: string) => {
+    const digits = value.replace(/\D/g, '');
+    return `••••${digits.slice(-4)}`;
+  };
+
   // When a barcode is detected automatically
   const onCodeDetected = async (raw: string) => {
     stopCamera();
     setError(null);
 
     const parsed = parseArgentineDniPdf417(raw);
+
     if (!parsed) {
       setError('Código no reconocido. Volvé a enfocar el código de barras del dorso de tu DNI.');
       setStep('idle');
@@ -85,36 +189,53 @@ export default function ExpressVotingPage() {
     setStep('verifying');
 
     try {
-      const govRes = await verifyDniWithGovernmentApi(parsed.data);
-      if (!govRes.valid) {
-        setError(govRes.message);
+      const eligibility = await verifyVoterEligibility(
+        String(parsed.data.dniNumber)
+      );
+
+      if (!eligibility.eligible) {
+        setError(
+          eligibility.message ||
+          'Este DNI no pertenece al padrón privado de esta elección.'
+        );
         setStep('idle');
         return;
       }
 
-      const { nullifierHex } = await computeDniNullifier(parsed.data);
-      setNullifier(nullifierHex);
       setStep('voting');
     } catch (err: any) {
-      setError(err?.message || 'Error al verificar en RENAPER.');
+      setError(
+        err?.message ||
+        'No se pudo verificar la elegibilidad en Midnight.'
+      );
       setStep('idle');
     }
   };
 
   // Cast the vote
   const handleVote = async () => {
-    if (!dniData || !nullifier) return;
+    if (!dniData) return;
+
     setError(null);
     setStep('submitting');
 
     try {
-      const birthYear = new Date(dniData.birthDate).getFullYear();
-      const res = await submitVoteToMidnight(nullifier, selectedCandidate, birthYear);
+      const res = await submitRealVote(
+        String(dniData.dniNumber),
+        selectedCandidate
+      );
+
       setResult(res);
-      setLedger(res.updatedLedger);
+      setLedger((current) => ({
+        ...current,
+        totalVotes: res.totalVotes,
+      }));
       setStep('done');
     } catch (err: any) {
-      setError(err?.message || 'Error al emitir el voto.');
+      setError(
+        err?.message ||
+        'El contrato Midnight rechazó el voto.'
+      );
       setStep('voting');
     }
   };
@@ -135,17 +256,178 @@ export default function ExpressVotingPage() {
         <div style={{ textAlign: 'center' }}>
           <div style={{ display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 14px', borderRadius: 999, background: 'rgba(139, 92, 246, 0.1)', border: '1px solid rgba(139, 92, 246, 0.2)', fontSize: 11, fontWeight: 600, color: '#a78bfa', letterSpacing: 0.5, marginBottom: 12 }}>
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
-            Midnight Network • ZK Privacy
+            Midnight Preview • ZK Privacy
           </div>
           <h1 style={{ fontSize: 32, fontWeight: 800, letterSpacing: -1, background: 'linear-gradient(135deg, #f1f5f9, #a78bfa)', WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent', lineHeight: 1.1 }}>
             Express Voting
           </h1>
           <p style={{ fontSize: 13, color: 'var(--text-secondary)', marginTop: 8, lineHeight: 1.5 }}>
-            Escaneá tu DNI argentino para votar de forma anónima y verificable.
+            Escaneá tu DNI argentino para emitir un voto privado y verificable.
           </p>
         </div>
 
+    {/* Election lifecycle */}
+    {!election && (
+      <div className="glass-card" style={{ padding: 24, textAlign: 'center' }}>
+        <div style={{ fontSize: 14, color: 'var(--text-secondary)' }}>
+          Consultando estado de la elección...
+        </div>
+      </div>
+    )}
+
+    {election?.status === 'SIN_CONFIGURAR' && (
+      <div className="glass-card-glow" style={{ padding: 30, textAlign: 'center' }}>
+        <div style={{ fontSize: 38, marginBottom: 12 }}>🗳️</div>
+        <h2 style={{ fontSize: 22, fontWeight: 800 }}>
+          Elección aún no configurada
+        </h2>
+        <p style={{ fontSize: 13, color: 'var(--text-muted)', marginTop: 8 }}>
+          El administrador todavía no definió el horario de votación.
+        </p>
+      </div>
+    )}
+
+    {election?.status === 'PROGRAMADA' && (
+      <div className="glass-card-glow" style={{ padding: 30, textAlign: 'center' }}>
+        <div
+          style={{
+            color: '#a78bfa',
+            fontSize: 11,
+            fontWeight: 800,
+            letterSpacing: 1,
+          }}
+        >
+          VOTACIÓN PROGRAMADA
+        </div>
+
+        <h2 style={{ fontSize: 22, fontWeight: 800, marginTop: 10 }}>
+          Comienza en
+        </h2>
+
+        <div
+          className="font-mono"
+          style={{
+            fontSize: 34,
+            fontWeight: 900,
+            color: '#c4b5fd',
+            margin: '20px 0 8px',
+          }}
+        >
+          {formatCountdown(countdownSeconds)}
+        </div>
+
+        <div style={{ color: 'var(--text-muted)', fontSize: 12 }}>
+          {formatElectionDate(election.votingStart)}
+        </div>
+      </div>
+    )}
+
+    {election?.status === 'ABIERTA' && (
+      <div
+        style={{
+          padding: '14px 18px',
+          borderRadius: 16,
+          background: 'rgba(16,185,129,0.06)',
+          border: '1px solid rgba(16,185,129,0.22)',
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'center',
+          gap: 12,
+        }}
+      >
+        <div>
+          <div style={{ color: '#10b981', fontSize: 11, fontWeight: 800 }}>
+            ● VOTACIÓN ABIERTA
+          </div>
+          <div style={{ color: 'var(--text-muted)', fontSize: 11, marginTop: 3 }}>
+            Tiempo restante
+          </div>
+        </div>
+
+        <div
+          className="font-mono"
+          style={{ fontSize: 22, fontWeight: 900, color: '#6ee7b7' }}
+        >
+          {formatCountdown(countdownSeconds)}
+        </div>
+      </div>
+    )}
+
+    {election?.status === 'FINALIZADA' && (
+      <div className="glass-card-glow" style={{ padding: 30, textAlign: 'center' }}>
+        <div
+          style={{
+            width: 70,
+            height: 70,
+            margin: '0 auto 18px',
+            borderRadius: 999,
+            background: 'rgba(139,92,246,0.12)',
+            border: '1px solid rgba(139,92,246,0.3)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            fontSize: 30,
+          }}
+        >
+          ✓
+        </div>
+
+        <h2 style={{ fontSize: 24, fontWeight: 800 }}>
+          Votación finalizada
+        </h2>
+
+        <p style={{ color: 'var(--text-muted)', fontSize: 13, marginTop: 6 }}>
+          La elección ha concluido.
+        </p>
+
+        <div
+          style={{
+            display: 'grid',
+            gridTemplateColumns: '1fr 1fr',
+            gap: 12,
+            marginTop: 24,
+          }}
+        >
+          <div
+            style={{
+              padding: 18,
+              borderRadius: 16,
+              background: 'rgba(255,255,255,0.03)',
+              border: '1px solid var(--border-subtle)',
+            }}
+          >
+            <div style={{ color: 'var(--text-muted)', fontSize: 11 }}>
+              Votos emitidos
+            </div>
+            <div style={{ fontSize: 30, fontWeight: 900, color: '#a78bfa', marginTop: 5 }}>
+              {election.totalVotes}
+            </div>
+          </div>
+
+          <div
+            style={{
+              padding: 18,
+              borderRadius: 16,
+              background: 'rgba(255,255,255,0.03)',
+              border: '1px solid var(--border-subtle)',
+            }}
+          >
+            <div style={{ color: 'var(--text-muted)', fontSize: 11 }}>
+              Participación
+            </div>
+            <div style={{ fontSize: 30, fontWeight: 900, color: '#10b981', marginTop: 5 }}>
+              {election.participation.toFixed(1)}%
+            </div>
+          </div>
+        </div>
+
+        <div style={{ marginTop: 16, fontSize: 12, color: 'var(--text-secondary)' }}>
+          {election.totalVotes} de {election.registeredVoters} votantes habilitados
+        </div>
+      </div>
+    )}
         {/* Main Card */}
+    {election?.status === 'ABIERTA' && (
         <div className="glass-card-glow" style={{ padding: 32, position: 'relative', overflow: 'hidden' }}>
 
           {/* IDLE: Show scan button */}
@@ -192,9 +474,9 @@ export default function ExpressVotingPage() {
             <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 16, padding: '32px 0' }}>
               <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="var(--accent-purple)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ animation: 'pulse-ring 1.2s ease infinite' }}><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
               <div style={{ textAlign: 'center' }}>
-                <h3 style={{ fontSize: 18, fontWeight: 700 }}>Verificando en RENAPER...</h3>
+                <h3 style={{ fontSize: 18, fontWeight: 700 }}>Verificando padrón privado...</h3>
                 <p style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 4 }}>
-                  Comprobando validez del documento y mayoría de edad.
+                  Consultando el padrón privado. La prueba ZK se genera al emitir el voto.
                 </p>
               </div>
             </div>
@@ -209,7 +491,7 @@ export default function ExpressVotingPage() {
                 <div>
                   <div style={{ fontSize: 14, fontWeight: 700 }}>{personName}</div>
                   <div style={{ fontSize: 11, color: 'var(--text-muted)' }} className="font-mono">
-                    DNI {dniData.dniNumber} • RENAPER ✓
+                    DNI {maskDni(String(dniData.dniNumber))} • Padrón privado ✓
                   </div>
                 </div>
               </div>
@@ -266,15 +548,15 @@ export default function ExpressVotingPage() {
               <div style={{ textAlign: 'center' }}>
                 <h3 style={{ fontSize: 22, fontWeight: 800 }}>¡Voto Registrado!</h3>
                 <p style={{ fontSize: 13, color: 'var(--text-muted)', marginTop: 4 }}>
-                  Tu voto fue emitido de forma anónima en Midnight Network.
+                  Tu identidad no fue publicada on-chain. Midnight registró el commitment del voto.
                 </p>
               </div>
 
               <div style={{ width: '100%', padding: 16, borderRadius: 16, background: 'rgba(0,0,0,0.3)', border: '1px solid var(--border-subtle)' }}>
                 <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 4 }}>Opción elegida</div>
                 <div style={{ fontSize: 15, fontWeight: 700, color: selectedCandidate === 1 ? '#10b981' : '#3b82f6' }}>{result.candidateName}</div>
-                <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 12, marginBottom: 4 }}>Prueba ZK</div>
-                <div className="font-mono" style={{ fontSize: 10, color: '#a78bfa', wordBreak: 'break-all', lineHeight: 1.6 }}>{result.proofHash}</div>
+                <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 12, marginBottom: 4 }}>Vote commitment</div>
+                <div className="font-mono" style={{ fontSize: 10, color: '#a78bfa', wordBreak: 'break-all', lineHeight: 1.6 }}>{result.voteCommitment}</div>
               </div>
 
               <button className="btn-primary" onClick={handleReset} style={{ width: '100%', padding: '14px', fontSize: 14 }}>
@@ -284,6 +566,7 @@ export default function ExpressVotingPage() {
           )}
         </div>
 
+    )}
         {/* Error message */}
         {error && (
           <div style={{ padding: '14px 18px', borderRadius: 16, background: 'rgba(239, 68, 68, 0.08)', border: '1px solid rgba(239, 68, 68, 0.2)', display: 'flex', alignItems: 'flex-start', gap: 10, fontSize: 12, color: '#fca5a5' }}>
@@ -299,15 +582,33 @@ export default function ExpressVotingPage() {
             <span style={{ fontWeight: 600 }}>Ledger Midnight</span>
           </div>
           <div className="font-mono" style={{ display: 'flex', gap: 16, fontWeight: 700, fontSize: 13 }}>
-            <span style={{ color: '#10b981' }}>A: {ledger.votesCandidateA}</span>
-            <span style={{ color: '#3b82f6' }}>B: {ledger.votesCandidateB}</span>
+            <span style={{ color: '#a78bfa' }}>
+              Votos emitidos: {ledger.totalVotes}
+            </span>
           </div>
         </div>
 
-        {/* Server status */}
+        {/* Server / wallet status */}
         <div style={{ textAlign: 'center', fontSize: 11, color: 'var(--text-muted)', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6 }}>
-          <div style={{ width: 6, height: 6, borderRadius: 999, background: serverOnline ? '#10b981' : '#f59e0b' }} />
-          <span>Proof Server {serverOnline ? 'conectado' : 'simulación local'}</span>
+          <div
+            style={{
+              width: 6,
+              height: 6,
+              borderRadius: 999,
+              background: !serverOnline
+                ? '#ef4444'
+                : walletReady
+                  ? '#10b981'
+                  : '#f59e0b',
+            }}
+          />
+          <span>
+            {!serverOnline
+              ? 'Midnight API offline'
+              : walletReady
+                ? 'Midnight Preview • Wallet SDK listo'
+                : 'Midnight Preview online • Wallet sincronizando'}
+          </span>
         </div>
       </div>
     </div>

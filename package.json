@@ -1,0 +1,34 @@
+{
+  "name": "express-voting-midnight",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "proof:up": "docker compose up -d proof-server",
+    "proof:down": "docker compose stop proof-server",
+    "api:preview": "node --env-file=.env.preview scripts/midnight-preview-api.mjs",
+    "app:dev": "npm --prefix app run dev",
+    "app:build": "npm --prefix app run build",
+    "check:server": "node --check scripts/midnight-preview-api.mjs && node --check scripts/midnight-preview-worker.mjs",
+    "voters:commitments": "node scripts/generate-voter-commitments.mjs",
+    "check:source": "node scripts/check-hackathon-source.mjs"
+  },
+  "dependencies": {
+    "@midnight-ntwrk/compact-runtime": "0.16.0",
+    "@midnight-ntwrk/midnight-js-contracts": "^4.1.1",
+    "@midnight-ntwrk/midnight-js-http-client-proof-provider": "^4.1.1",
+    "@midnight-ntwrk/midnight-js-indexer-public-data-provider": "^4.1.1",
+    "@midnight-ntwrk/midnight-js-level-private-state-provider": "^4.1.1",
+    "@midnight-ntwrk/midnight-js-network-id": "^4.1.1",
+    "@midnight-ntwrk/midnight-js-node-zk-config-provider": "^4.1.1",
+    "@midnight-ntwrk/midnight-js-protocol": "^4.1.1",
+    "@midnight-ntwrk/midnight-js-types": "^4.1.1",
+    "@midnight-ntwrk/midnight-js-utils": "^4.1.1",
+    "@midnight-ntwrk/onchain-runtime-v3": "3.0.0",
+    "@midnight-ntwrk/testkit-js": "^4.1.1",
+    "@midnight-ntwrk/wallet-sdk": "^1.2.0",
+    "firebase-admin": "^14.2.0",
+    "pino": "^10.3.1",
+    "rxjs": "^7.8.2",
+    "ws": "^8.18.3"
+  }
+}

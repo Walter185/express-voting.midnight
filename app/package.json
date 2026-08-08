@@ -5,10 +5,10 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
-    "start": "next start",
-    "build:compact": "compactc contract/dni_verifier.compact --out src/managed/dni_verifier || echo 'Compact bindings prepared'"
+    "start": "next start"
   },
   "dependencies": {
+    "firebase": "^12.17.1",
     "next": "14.2.5",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",

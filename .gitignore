@@ -1,20 +1,23 @@
 node_modules/
+app/node_modules/
 dist/
+.next/
+app/.next/
+app/out/
+app/.firebase/
+*.tsbuildinfo
+
+# Secrets / environment
 .env
 .env.*
 !.env.example
-contract/src/managed/
-.DS_Store
 
-# Local/build files
-node_modules/
-.next/
-out/
-.firebase/
-firebase-debug.log*
-.env
-.env.*
+# Private electoral data and credentials
 private/
 
-# Temporary scanner backup
-app/src/lib/cameraScanner.backup.ts
+# Local Midnight/runtime state
+logs/
+midnight-level-db/
+.run/
+
+.DS_Store
